@@ -6,7 +6,7 @@
 <title>Media (img-1…img-Y)</title>
 <link rel="manifest" href="data:application/manifest+json,{&quot;name&quot;:&quot;Media&quot;,&quot;short_name&quot;:&quot;Media&quot;,&quot;start_url&quot;:&quot;./&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#000&quot;,&quot;theme_color&quot;:&quot;#000&quot;}" />
 <style>
-  :root{--bg:#000;--fg:#fff;--dim:rgba(0,0,0,.45);--btnBg:rgba(0,0,0,.55);--btnRing:rgba(255,255,255,.18)}
+  :root{--bg:#000;--fg:#fff;--dim:rgba(0,0,0,.45);--btnBg:rgba(0,0,0,.55);--btnRing:rgba(255,255,255,.18);--bar:#3b82f6}
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);-webkit-tap-highlight-color:transparent}
 
@@ -18,11 +18,11 @@
   .media{width:100vw;height:100dvh;max-width:100vw;max-height:100dvh;object-fit:contain;background:#000}
   video.media{background:#000}
 
-  /* Audio layout */
+  /* Audio */
   .audioWrap{display:grid;place-items:center;width:100%;height:100%;padding:16px}
   .audioPlayer{width:min(820px,92vw)}
 
-  /* Per-item Download (small) */
+  /* Download */
   .dl{position:absolute;right:10px;bottom:10px;border:0;border-radius:999px;background:var(--dim);
       padding:10px 14px;color:#fff;font-weight:700;text-decoration:none;font-size:14px;backdrop-filter:blur(6px)}
   .dl:active{transform:translateY(1px)}
@@ -32,11 +32,10 @@
   .hidden{visibility:hidden}
 
   /* === BIG NAV BUTTONS === */
-  .navZones{position:fixed;inset:0;pointer-events:none} /* container */
+  .navZones{position:fixed;inset:0;pointer-events:none}
   .zone{position:absolute;top:0;bottom:0;width:50%;pointer-events:auto}
   .left{left:0}
   .right{right:0}
-  /* make entire half-screen tappable, show a big circular button centered vertically */
   .bigBtn{
     position:absolute;top:50%;transform:translateY(-50%);
     width:88px;height:88px;border-radius:999px;border:2px solid var(--btnRing);
@@ -46,16 +45,23 @@
   .left .bigBtn{left:12px}
   .right .bigBtn{right:12px}
   .bigBtn:active{transform:translateY(-50%) scale(.98)}
-
-  /* Larger on tablets/desktops */
   @media (min-width:768px){
     .bigBtn{width:104px;height:104px;font-size:48px;border-width:3px}
     .left .bigBtn{left:18px}
     .right .bigBtn{right:18px}
   }
+
+  /* === LOADING BAR === */
+  .loadWrap{position:fixed;top:0;left:0;right:0;height:3px;background:transparent;z-index:9999}
+  .bar{position:absolute;left:0;top:0;height:100%;width:0;background:var(--bar);transition:width .25s ease}
+  .indeterminate{background:linear-gradient(90deg,transparent,rgba(59,130,246,.7),transparent);
+    background-size:200% 100%;animation:indet 1s linear infinite}
+  @keyframes indet{0%{background-position:200% 0}100%{background-position:-200% 0}}
 </style>
 </head>
 <body>
+<div class="loadWrap"><div id="loadBar" class="bar indeterminate"></div></div>
+
 <div id="stack" class="stack" aria-live="polite"></div>
 
 <!-- Big navigation overlay -->
@@ -81,14 +87,17 @@ const qs=new URLSearchParams(location.search);
 const startIndex = Math.max(1, parseInt(qs.get("start")||"1",10));
 const maxIndex   = Math.min(parseInt(qs.get("max")||"999",10) || 999, 5000);
 const stopAtFirstMiss = (qs.get("gap")||"").toLowerCase()!=="allow"; // contiguous
+const scanConcurrency = 6; // speed up discovery without hammering
 
-/* ===== State ===== */
+/* ===== Elements & state ===== */
 const $stack = document.getElementById("stack");
 const $btnPrev = document.getElementById("btnPrev");
 const $btnNext = document.getElementById("btnNext");
+const $bar = document.getElementById("loadBar");
 const observed = new WeakSet();
-let slidesRef = []; // list of slide elements in order
+let slidesRef = [];
 
+/* ===== Networking helpers ===== */
 async function headOrTinyGet(url){
   try{ const r = await fetch(url,{method:"HEAD",cache:"no-store"}); if (r.ok) return r; }catch{}
   try{ const r2= await fetch(url,{headers:{"Range":"bytes=0-0"},cache:"no-store"}); return r2; }catch{ return {ok:false}; }
@@ -108,6 +117,8 @@ async function findMediaFor(i){
   }
   return null;
 }
+
+/* ===== UI builders ===== */
 function makeSlide(meta){
   const slide = document.createElement("section");
   slide.className = "slide";
@@ -150,43 +161,112 @@ function mountMedia(slide){
     wrap.appendChild(aud); slide.appendChild(wrap); slide.querySelector(".ph")?.remove();
   }
 }
+
 /* Lazy mount */
 const io = new IntersectionObserver((entries)=>{
   entries.forEach(e=>{ if(e.isIntersecting) mountMedia(e.target); });
 },{root:$stack, rootMargin:"200px 0px", threshold:0.01});
 
-/* Build slides by scanning sequentially (stop at first miss once something found) */
-(async function scan(){
-  let foundAny = false;
-  const slides = [];
+/* ===== Loading bar control ===== */
+function setIndeterminate(on){
+  if (on){ $bar.classList.add("indeterminate"); $bar.style.width="100%"; }
+  else { $bar.classList.remove("indeterminate"); $bar.style.width="0%"; }
+}
+function setProgress(f){ // f in [0,1]
+  $bar.classList.remove("indeterminate");
+  $bar.style.width = (Math.max(0, Math.min(1, f))*100).toFixed(1)+"%";
+}
+function hideBar(){ $bar.style.width="0%"; $bar.classList.remove("indeterminate"); $bar.parentElement.style.display="none"; }
+
+/* ===== Scan strategy =====
+   1) Quickly find the FIRST existing index (sequentially) and show it immediately.
+   2) Continue scanning forward with small concurrency until first miss (contiguous), building slides.
+   3) While scanning, update loading bar (indeterminate -> determinate once we know total).
+*/
+(async function boot(){
+  setIndeterminate(true);
+
+  // 1) Find first hit
+  let firstMeta = null;
   for (let i=startIndex; i<=maxIndex; i++){
-    const meta = await findMediaFor(i);
-    if (meta){
-      const s = makeSlide(meta);
-      slides.push(s);
-      foundAny = true;
-    }else if (foundAny && stopAtFirstMiss){
-      break;
-    }
+    const m = await findMediaFor(i);
+    if (m){ firstMeta = m; break; }
   }
-  if (slides.length===0){
+  if (!firstMeta){
+    // nothing found
+    setIndeterminate(false);
+    hideBar();
     const empty=document.createElement("div");
     empty.style.cssText="display:grid;place-items:center;height:100dvh;color:#bbb;font:16px system-ui;text-align:center;padding:24px";
     empty.textContent="No media found. Place files named img-1, img-2, … (contiguous) with supported extensions next to this page.";
     $stack.appendChild(empty);
     return;
   }
-  slides.forEach(s=>{ $stack.appendChild(s); io.observe(s); });
-  slidesRef = slides;
+
+  // Show the first slide immediately
+  const firstSlide = makeSlide(firstMeta);
+  $stack.appendChild(firstSlide);
+  slidesRef.push(firstSlide);
+  io.observe(firstSlide);
+  // Ensure it's mounted right away for instant visual
+  mountMedia(firstSlide);
+
+  // 2) Continue scanning forward with limited concurrency
+  let stop = false;
+  let lastGood = firstMeta.index;
+  let knownTotal = null; // when we hit first miss
+  let discovered = 1;
+
+  async function scanIndex(i){
+    if (stop) return;
+    const m = await findMediaFor(i);
+    if (m){
+      lastGood = i;
+      discovered++;
+      const s = makeSlide(m);
+      $stack.appendChild(s);
+      slidesRef.push(s);
+      io.observe(s);
+    }else if (stopAtFirstMiss){
+      // We hit the first gap -> we know total count now
+      stop = true;
+      knownTotal = lastGood - firstMeta.index + 1;
+      setProgress(discovered / knownTotal);
+      hideBar(); // done
+      return;
+    }
+    if (knownTotal){
+      setProgress(discovered / knownTotal);
+      if (discovered >= knownTotal) hideBar();
+    }
+  }
+
+  // Kick off workers
+  let cursor = firstMeta.index + 1;
+  const workers = Array.from({length: scanConcurrency}, async ()=>{
+    while(!stop && cursor <= maxIndex){
+      const i = cursor++; // claim next
+      await scanIndex(i);
+      if (!stop && !knownTotal && stopAtFirstMiss){
+        // If we found a miss, scanIndex will set stop & knownTotal and hide bar
+      }
+    }
+  });
+  await Promise.all(workers);
+
+  // If sequence reached maxIndex and we never saw a miss (rare), switch bar off
+  if (!knownTotal){
+    setIndeterminate(false);
+    hideBar();
+  }
 
   // Optional deep-link to #N (1-based)
   const h = parseInt(location.hash.replace("#",""),10);
-  if (!isNaN(h) && h>=1 && h<=slides.length){ slides[h-1].scrollIntoView({block:"start"}); }
+  if (!isNaN(h) && h>=1 && h<=slidesRef.length){ slidesRef[h-1].scrollIntoView({block:"start"}); }
 })();
 
-/* ===== BIG NAV BUTTONS behavior ===== */
+/* ===== BIG NAV BUTTONS ===== */
 function currentSlideIndex(){
-  // find slide closest to viewport top
   let bestIdx = 0, bestDist = Infinity;
   slidesRef.forEach((el, i)=>{
     const r = el.getBoundingClientRect();
@@ -204,13 +284,12 @@ function goto(idx){
 document.getElementById("btnPrev").addEventListener("click", ()=> goto(currentSlideIndex()-1));
 document.getElementById("btnNext").addEventListener("click", ()=> goto(currentSlideIndex()+1));
 
-/* Keyboard */
 addEventListener("keydown", (e)=>{
   if (e.key==="ArrowLeft") goto(currentSlideIndex()-1);
   if (e.key==="ArrowRight") goto(currentSlideIndex()+1);
 });
 
-/* Swipe (horizontal for buttons users who try) */
+/* Horizontal swipe for next/prev */
 let x0=null,y0=null;
 addEventListener("touchstart",e=>{ const t=e.touches[0]; x0=t.clientX; y0=t.clientY; },{passive:true});
 addEventListener("touchend",e=>{
@@ -220,7 +299,7 @@ addEventListener("touchend",e=>{
   x0=y0=null;
 },{passive:true});
 
-/* Register SW placed NEXT to this file (relative path) */
+/* Service worker (same folder) */
 if ("serviceWorker" in navigator){
   navigator.serviceWorker.register("./sw.js").catch(()=>{});
 }
