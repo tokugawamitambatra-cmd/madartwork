@@ -6,28 +6,67 @@
 <title>Media (img-1…img-Y)</title>
 <link rel="manifest" href="data:application/manifest+json,{&quot;name&quot;:&quot;Media&quot;,&quot;short_name&quot;:&quot;Media&quot;,&quot;start_url&quot;:&quot;./&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#000&quot;,&quot;theme_color&quot;:&quot;#000&quot;}" />
 <style>
-  :root{--bg:#000;--fg:#fff;--dim:rgba(0,0,0,.45)}
+  :root{--bg:#000;--fg:#fff;--dim:rgba(0,0,0,.45);--btnBg:rgba(0,0,0,.55);--btnRing:rgba(255,255,255,.18)}
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);-webkit-tap-highlight-color:transparent}
-  /* Vertical, full-viewport slides with snap */
-  .stack{height:100%;width:100%;overflow:auto;scroll-snap-type:y mandatory;scroll-behavior:smooth}
-  .slide{position:relative;min-height:100dvh;height:100dvh;display:grid;place-items:center;padding:0;margin:0;scroll-snap-align:start;scroll-snap-stop:always}
+
+  /* Vertical full-viewport stack with snap */
+  .stack{height:100%;width:100%;overflow:auto;scroll-snap-type:y mandatory;scroll-behavior:smooth;background:#000}
+  .slide{position:relative;min-height:100dvh;height:100dvh;display:grid;place-items:center;scroll-snap-align:start;scroll-snap-stop:always}
+
   /* Fit media to screen without cropping */
-  .media{max-width:100vw;max-height:100dvh;width:100vw;height:100dvh;object-fit:contain;background:#000}
+  .media{width:100vw;height:100dvh;max-width:100vw;max-height:100dvh;object-fit:contain;background:#000}
   video.media{background:#000}
-  audio.wrap{display:grid;place-items:center;width:100%;height:100%;padding:16px}
-  audio.player{width:min(820px,92vw)}
-  /* Small per-item download button */
-  .dl{position:absolute;right:10px;bottom:10px;border:0;border-radius:999px;background:var(--dim);padding:10px 14px;color:#fff;font-weight:700;text-decoration:none;font-size:14px;backdrop-filter:blur(6px)}
+
+  /* Audio layout */
+  .audioWrap{display:grid;place-items:center;width:100%;height:100%;padding:16px}
+  .audioPlayer{width:min(820px,92vw)}
+
+  /* Per-item Download (small) */
+  .dl{position:absolute;right:10px;bottom:10px;border:0;border-radius:999px;background:var(--dim);
+      padding:10px 14px;color:#fff;font-weight:700;text-decoration:none;font-size:14px;backdrop-filter:blur(6px)}
   .dl:active{transform:translateY(1px)}
-  /* Lazy placeholder */
-  .ph{position:absolute;inset:0;display:grid;place-items:center;color:#888;font:14px system-ui}
-  /* Hide until loaded to prevent layout pop */
+
+  /* Placeholder */
+  .ph{position:absolute;inset:0;display:grid;place-items:center;color:#8a8a8a;font:14px system-ui}
   .hidden{visibility:hidden}
+
+  /* === BIG NAV BUTTONS === */
+  .navZones{position:fixed;inset:0;pointer-events:none} /* container */
+  .zone{position:absolute;top:0;bottom:0;width:50%;pointer-events:auto}
+  .left{left:0}
+  .right{right:0}
+  /* make entire half-screen tappable, show a big circular button centered vertically */
+  .bigBtn{
+    position:absolute;top:50%;transform:translateY(-50%);
+    width:88px;height:88px;border-radius:999px;border:2px solid var(--btnRing);
+    display:grid;place-items:center;background:var(--btnBg);color:#fff;
+    font-size:40px;line-height:1;text-decoration:none;user-select:none;cursor:pointer
+  }
+  .left .bigBtn{left:12px}
+  .right .bigBtn{right:12px}
+  .bigBtn:active{transform:translateY(-50%) scale(.98)}
+
+  /* Larger on tablets/desktops */
+  @media (min-width:768px){
+    .bigBtn{width:104px;height:104px;font-size:48px;border-width:3px}
+    .left .bigBtn{left:18px}
+    .right .bigBtn{right:18px}
+  }
 </style>
 </head>
 <body>
 <div id="stack" class="stack" aria-live="polite"></div>
+
+<!-- Big navigation overlay -->
+<div class="navZones" aria-hidden="false">
+  <div class="zone left">
+    <button id="btnPrev" class="bigBtn" aria-label="Previous" title="Previous (←)">&#x2039;</button>
+  </div>
+  <div class="zone right">
+    <button id="btnNext" class="bigBtn" aria-label="Next" title="Next (→)">&#x203A;</button>
+  </div>
+</div>
 
 <script>
 /* ===== Config ===== */
@@ -39,29 +78,27 @@ const exts = {
 };
 const allExts=[...exts.image,...exts.video,...exts.audio];
 const qs=new URLSearchParams(location.search);
-const startIndex = parseInt(qs.get("start")||"1",10);
-const maxIndex   = Math.min(parseInt(qs.get("max")||"999",10),5000);
-const gapLimit   = Math.min(parseInt(qs.get("gap")||"10",10),100);
+const startIndex = Math.max(1, parseInt(qs.get("start")||"1",10));
+const maxIndex   = Math.min(parseInt(qs.get("max")||"999",10) || 999, 5000);
+const stopAtFirstMiss = (qs.get("gap")||"").toLowerCase()!=="allow"; // contiguous
 
-/* ===== Helpers ===== */
+/* ===== State ===== */
 const $stack = document.getElementById("stack");
+const $btnPrev = document.getElementById("btnPrev");
+const $btnNext = document.getElementById("btnNext");
 const observed = new WeakSet();
+let slidesRef = []; // list of slide elements in order
 
-async function headOrRange(url){
-  try{
-    let r = await fetch(url,{method:"HEAD",cache:"no-store"});
-    if (r.ok) return r;
-    r = await fetch(url,{headers:{"Range":"bytes=0-0"},cache:"no-store"});
-    return r;
-  }catch{ return {ok:false}; }
+async function headOrTinyGet(url){
+  try{ const r = await fetch(url,{method:"HEAD",cache:"no-store"}); if (r.ok) return r; }catch{}
+  try{ const r2= await fetch(url,{headers:{"Range":"bytes=0-0"},cache:"no-store"}); return r2; }catch{ return {ok:false}; }
 }
-
 async function findMediaFor(i){
   for (const ext of allExts){
     const url = `${baseName}${i}.${ext}`;
-    const r = await headOrRange(url);
+    const r = await headOrTinyGet(url);
     if (r.ok){
-      const ct=(r.headers.get("content-type")||"").toLowerCase();
+      const ct=(r.headers?.get?.("content-type")||"").toLowerCase();
       const t = ct.startsWith("image") ? "image"
              : ct.startsWith("video") ? "video"
              : ct.startsWith("audio") ? "audio"
@@ -71,13 +108,11 @@ async function findMediaFor(i){
   }
   return null;
 }
-
-function slideTemplate(meta){
+function makeSlide(meta){
   const slide = document.createElement("section");
   slide.className = "slide";
   slide.dataset.url = meta.url;
   slide.dataset.type = meta.type;
-  slide.dataset.idx = meta.index;
 
   const ph = document.createElement("div");
   ph.className = "ph";
@@ -93,92 +128,101 @@ function slideTemplate(meta){
 
   return slide;
 }
-
 function mountMedia(slide){
   if (observed.has(slide)) return;
   observed.add(slide);
   const url = slide.dataset.url;
-  const t = slide.dataset.type;
+  const t   = slide.dataset.type;
 
   if (t === "image"){
     const img = document.createElement("img");
-    img.className = "media hidden";
-    img.alt = url;
-    img.loading = "eager";
-    img.decoding = "async";
-    img.addEventListener("load", ()=>{
-      img.classList.remove("hidden");
-      slide.querySelector(".ph")?.remove();
-    }, {once:true});
-    img.src = url;
-    slide.appendChild(img);
+    img.className = "media hidden"; img.alt = url; img.decoding="async";
+    img.addEventListener("load", ()=>{ img.classList.remove("hidden"); slide.querySelector(".ph")?.remove(); }, {once:true});
+    img.src = url; slide.appendChild(img);
   }else if (t === "video"){
     const vid = document.createElement("video");
-    vid.className = "media hidden";
-    vid.playsInline = true;
-    vid.controls = true;
-    vid.preload = "metadata";
-    vid.addEventListener("loadeddata", ()=>{
-      vid.classList.remove("hidden");
-      slide.querySelector(".ph")?.remove();
-    }, {once:true});
-    vid.src = url;
-    slide.appendChild(vid);
+    vid.className="media hidden"; vid.playsInline=true; vid.controls=true; vid.preload="metadata";
+    vid.addEventListener("loadeddata", ()=>{ vid.classList.remove("hidden"); slide.querySelector(".ph")?.remove(); }, {once:true});
+    vid.src = url; slide.appendChild(vid);
   }else{
-    const wrap = document.createElement("div");
-    wrap.className="audio wrap";
-    const aud = document.createElement("audio");
-    aud.className="player";
-    aud.controls = true;
-    aud.preload = "metadata";
-    aud.src = url;
-    wrap.appendChild(aud);
-    slide.appendChild(wrap);
-    slide.querySelector(".ph")?.remove();
+    const wrap = document.createElement("div"); wrap.className="audioWrap";
+    const aud = document.createElement("audio"); aud.className="audioPlayer"; aud.controls=true; aud.preload="metadata"; aud.src=url;
+    wrap.appendChild(aud); slide.appendChild(wrap); slide.querySelector(".ph")?.remove();
   }
 }
-
-/* ===== Lazy mount with IntersectionObserver ===== */
+/* Lazy mount */
 const io = new IntersectionObserver((entries)=>{
-  entries.forEach(e=>{
-    if (e.isIntersecting) mountMedia(e.target);
-  });
+  entries.forEach(e=>{ if(e.isIntersecting) mountMedia(e.target); });
 },{root:$stack, rootMargin:"200px 0px", threshold:0.01});
 
-/* ===== Scan sequentially & build slides ===== */
+/* Build slides by scanning sequentially (stop at first miss once something found) */
 (async function scan(){
-  let misses = 0;
+  let foundAny = false;
   const slides = [];
   for (let i=startIndex; i<=maxIndex; i++){
     const meta = await findMediaFor(i);
     if (meta){
-      const s = slideTemplate(meta);
+      const s = makeSlide(meta);
       slides.push(s);
-      misses = 0;
-    }else{
-      misses++;
-      if (slides.length>0 && misses>=gapLimit) break;
+      foundAny = true;
+    }else if (foundAny && stopAtFirstMiss){
+      break;
     }
   }
   if (slides.length===0){
     const empty=document.createElement("div");
     empty.style.cssText="display:grid;place-items:center;height:100dvh;color:#bbb;font:16px system-ui;text-align:center;padding:24px";
-    empty.textContent="No media found. Place files named img-1, img-2, … with supported extensions next to this page.";
+    empty.textContent="No media found. Place files named img-1, img-2, … (contiguous) with supported extensions next to this page.";
     $stack.appendChild(empty);
     return;
   }
   slides.forEach(s=>{ $stack.appendChild(s); io.observe(s); });
-  // Optional: Jump to #N (1-based slide number in found list)
+  slidesRef = slides;
+
+  // Optional deep-link to #N (1-based)
   const h = parseInt(location.hash.replace("#",""),10);
-  if (!isNaN(h) && h>=1 && h<=slides.length){
-    slides[h-1].scrollIntoView({block:"start"});
-  }
+  if (!isNaN(h) && h>=1 && h<=slides.length){ slides[h-1].scrollIntoView({block:"start"}); }
 })();
 
-/* ===== Register SW at repo root ===== */
+/* ===== BIG NAV BUTTONS behavior ===== */
+function currentSlideIndex(){
+  // find slide closest to viewport top
+  let bestIdx = 0, bestDist = Infinity;
+  slidesRef.forEach((el, i)=>{
+    const r = el.getBoundingClientRect();
+    const dist = Math.abs(r.top);
+    if (dist < bestDist){ bestDist = dist; bestIdx = i; }
+  });
+  return bestIdx;
+}
+function goto(idx){
+  if (!slidesRef.length) return;
+  const clamped = Math.max(0, Math.min(idx, slidesRef.length-1));
+  slidesRef[clamped].scrollIntoView({block:"start", behavior:"smooth"});
+  location.hash = String(clamped+1);
+}
+document.getElementById("btnPrev").addEventListener("click", ()=> goto(currentSlideIndex()-1));
+document.getElementById("btnNext").addEventListener("click", ()=> goto(currentSlideIndex()+1));
+
+/* Keyboard */
+addEventListener("keydown", (e)=>{
+  if (e.key==="ArrowLeft") goto(currentSlideIndex()-1);
+  if (e.key==="ArrowRight") goto(currentSlideIndex()+1);
+});
+
+/* Swipe (horizontal for buttons users who try) */
+let x0=null,y0=null;
+addEventListener("touchstart",e=>{ const t=e.touches[0]; x0=t.clientX; y0=t.clientY; },{passive:true});
+addEventListener("touchend",e=>{
+  if (x0===null) return;
+  const t=e.changedTouches[0]; const dx=t.clientX-x0; const dy=t.clientY-y0;
+  if (Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)){ dx<0 ? goto(currentSlideIndex()+1) : goto(currentSlideIndex()-1); }
+  x0=y0=null;
+},{passive:true});
+
+/* Register SW placed NEXT to this file (relative path) */
 if ("serviceWorker" in navigator){
-  // Change this path if sw.js is not at the repo root
-  navigator.serviceWorker.register("/sw.js").catch(()=>{});
+  navigator.serviceWorker.register("./sw.js").catch(()=>{});
 }
 </script>
 </body>
