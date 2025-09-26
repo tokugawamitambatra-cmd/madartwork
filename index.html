@@ -1,1 +1,185 @@
-index.html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Media (img-1…img-Y)</title>
+<link rel="manifest" href="data:application/manifest+json,{&quot;name&quot;:&quot;Media&quot;,&quot;short_name&quot;:&quot;Media&quot;,&quot;start_url&quot;:&quot;./&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#000&quot;,&quot;theme_color&quot;:&quot;#000&quot;}" />
+<style>
+  :root{--bg:#000;--fg:#fff;--dim:rgba(0,0,0,.45)}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);-webkit-tap-highlight-color:transparent}
+  /* Vertical, full-viewport slides with snap */
+  .stack{height:100%;width:100%;overflow:auto;scroll-snap-type:y mandatory;scroll-behavior:smooth}
+  .slide{position:relative;min-height:100dvh;height:100dvh;display:grid;place-items:center;padding:0;margin:0;scroll-snap-align:start;scroll-snap-stop:always}
+  /* Fit media to screen without cropping */
+  .media{max-width:100vw;max-height:100dvh;width:100vw;height:100dvh;object-fit:contain;background:#000}
+  video.media{background:#000}
+  audio.wrap{display:grid;place-items:center;width:100%;height:100%;padding:16px}
+  audio.player{width:min(820px,92vw)}
+  /* Small per-item download button */
+  .dl{position:absolute;right:10px;bottom:10px;border:0;border-radius:999px;background:var(--dim);padding:10px 14px;color:#fff;font-weight:700;text-decoration:none;font-size:14px;backdrop-filter:blur(6px)}
+  .dl:active{transform:translateY(1px)}
+  /* Lazy placeholder */
+  .ph{position:absolute;inset:0;display:grid;place-items:center;color:#888;font:14px system-ui}
+  /* Hide until loaded to prevent layout pop */
+  .hidden{visibility:hidden}
+</style>
+</head>
+<body>
+<div id="stack" class="stack" aria-live="polite"></div>
+
+<script>
+/* ===== Config ===== */
+const baseName = "img-"; // img-1, img-2, ...
+const exts = {
+  image:["jpg","jpeg","png","webp","gif","svg","avif"],
+  video:["mp4","webm","ogv"],
+  audio:["mp3","m4a","aac","wav","oga","ogg"]
+};
+const allExts=[...exts.image,...exts.video,...exts.audio];
+const qs=new URLSearchParams(location.search);
+const startIndex = parseInt(qs.get("start")||"1",10);
+const maxIndex   = Math.min(parseInt(qs.get("max")||"999",10),5000);
+const gapLimit   = Math.min(parseInt(qs.get("gap")||"10",10),100);
+
+/* ===== Helpers ===== */
+const $stack = document.getElementById("stack");
+const observed = new WeakSet();
+
+async function headOrRange(url){
+  try{
+    let r = await fetch(url,{method:"HEAD",cache:"no-store"});
+    if (r.ok) return r;
+    r = await fetch(url,{headers:{"Range":"bytes=0-0"},cache:"no-store"});
+    return r;
+  }catch{ return {ok:false}; }
+}
+
+async function findMediaFor(i){
+  for (const ext of allExts){
+    const url = `${baseName}${i}.${ext}`;
+    const r = await headOrRange(url);
+    if (r.ok){
+      const ct=(r.headers.get("content-type")||"").toLowerCase();
+      const t = ct.startsWith("image") ? "image"
+             : ct.startsWith("video") ? "video"
+             : ct.startsWith("audio") ? "audio"
+             : (exts.image.includes(ext)?"image":exts.video.includes(ext)?"video":"audio");
+      return {index:i,url,type:t,ext};
+    }
+  }
+  return null;
+}
+
+function slideTemplate(meta){
+  const slide = document.createElement("section");
+  slide.className = "slide";
+  slide.dataset.url = meta.url;
+  slide.dataset.type = meta.type;
+  slide.dataset.idx = meta.index;
+
+  const ph = document.createElement("div");
+  ph.className = "ph";
+  ph.textContent = `Loading ${meta.url}…`;
+  slide.appendChild(ph);
+
+  const dl = document.createElement("a");
+  dl.className = "dl";
+  dl.href = meta.url;
+  dl.setAttribute("download", meta.url.split("/").pop());
+  dl.textContent = "Download";
+  slide.appendChild(dl);
+
+  return slide;
+}
+
+function mountMedia(slide){
+  if (observed.has(slide)) return;
+  observed.add(slide);
+  const url = slide.dataset.url;
+  const t = slide.dataset.type;
+
+  if (t === "image"){
+    const img = document.createElement("img");
+    img.className = "media hidden";
+    img.alt = url;
+    img.loading = "eager";
+    img.decoding = "async";
+    img.addEventListener("load", ()=>{
+      img.classList.remove("hidden");
+      slide.querySelector(".ph")?.remove();
+    }, {once:true});
+    img.src = url;
+    slide.appendChild(img);
+  }else if (t === "video"){
+    const vid = document.createElement("video");
+    vid.className = "media hidden";
+    vid.playsInline = true;
+    vid.controls = true;
+    vid.preload = "metadata";
+    vid.addEventListener("loadeddata", ()=>{
+      vid.classList.remove("hidden");
+      slide.querySelector(".ph")?.remove();
+    }, {once:true});
+    vid.src = url;
+    slide.appendChild(vid);
+  }else{
+    const wrap = document.createElement("div");
+    wrap.className="audio wrap";
+    const aud = document.createElement("audio");
+    aud.className="player";
+    aud.controls = true;
+    aud.preload = "metadata";
+    aud.src = url;
+    wrap.appendChild(aud);
+    slide.appendChild(wrap);
+    slide.querySelector(".ph")?.remove();
+  }
+}
+
+/* ===== Lazy mount with IntersectionObserver ===== */
+const io = new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{
+    if (e.isIntersecting) mountMedia(e.target);
+  });
+},{root:$stack, rootMargin:"200px 0px", threshold:0.01});
+
+/* ===== Scan sequentially & build slides ===== */
+(async function scan(){
+  let misses = 0;
+  const slides = [];
+  for (let i=startIndex; i<=maxIndex; i++){
+    const meta = await findMediaFor(i);
+    if (meta){
+      const s = slideTemplate(meta);
+      slides.push(s);
+      misses = 0;
+    }else{
+      misses++;
+      if (slides.length>0 && misses>=gapLimit) break;
+    }
+  }
+  if (slides.length===0){
+    const empty=document.createElement("div");
+    empty.style.cssText="display:grid;place-items:center;height:100dvh;color:#bbb;font:16px system-ui;text-align:center;padding:24px";
+    empty.textContent="No media found. Place files named img-1, img-2, … with supported extensions next to this page.";
+    $stack.appendChild(empty);
+    return;
+  }
+  slides.forEach(s=>{ $stack.appendChild(s); io.observe(s); });
+  // Optional: Jump to #N (1-based slide number in found list)
+  const h = parseInt(location.hash.replace("#",""),10);
+  if (!isNaN(h) && h>=1 && h<=slides.length){
+    slides[h-1].scrollIntoView({block:"start"});
+  }
+})();
+
+/* ===== Register SW at repo root ===== */
+if ("serviceWorker" in navigator){
+  // Change this path if sw.js is not at the repo root
+  navigator.serviceWorker.register("/sw.js").catch(()=>{});
+}
+</script>
+</body>
+</html>
