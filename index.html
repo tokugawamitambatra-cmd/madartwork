@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Media (img-1…img-Y)</title>
-<link rel="manifest" href="data:application/manifest+json,{&quot;name&quot;:&quot;Media&quot;,&quot;short_name&quot;:&quot;Media&quot;,&quot;start_url&quot;:&quot;./&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#000&quot;,&quot;theme_color&quot;:&quot;#000&quot;}" />
+<link rel="manifest" href="data:application/manifest+json,{&quot;name&quot;:&quot;Media&quot;,&quot;short_name&quot;:&quot;Media&quot;,&quot;start_url&quot;:&quot;./&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:#000,&quot;theme_color&quot;:#000}" />
 <style>
   :root{
     --bg:#000;--fg:#fff;--muted:#9aa3ad;
@@ -61,7 +61,7 @@
   }
   .dlGlobal:active{transform:translateX(-50%) translateY(1px)}
 
-  /* === LOADING OVERLAY (for first media) === */
+  /* === LOADING OVERLAY (first load only) === */
   .loader{
     position:fixed;inset:0;display:grid;place-items:center;
     background:rgba(0,0,0,.65);backdrop-filter:blur(6px);
@@ -71,8 +71,7 @@
   .spinWrap{display:grid;place-items:center;gap:14px}
   .ring{
     width:88px;height:88px;border-radius:50%;
-    background:
-      conic-gradient(from 0deg, var(--bar) 0 270deg, rgba(255,255,255,.15) 270deg 360deg);
+    background:conic-gradient(from 0deg, var(--bar) 0 270deg, rgba(255,255,255,.15) 270deg 360deg);
     -webkit-mask:radial-gradient(circle at 50% 50%, transparent 60%, #000 61%);
             mask:radial-gradient(circle at 50% 50%, transparent 60%, #000 61%);
     animation:spin 1s linear infinite;
@@ -81,12 +80,11 @@
   .loadText{font:600 14px/1.3 system-ui,Segoe UI,Roboto,Inter,Arial;color:#e5e7eb;text-align:center}
   .subText{font:12px system-ui;color:var(--muted)}
 
-  /* === TOP PROGRESS BAR (visible during scanning after first item) === */
-  .loadWrap{position:fixed;top:0;left:0;right:0;height:6px;background:var(--barBg);z-index:9999}
+  /* === TOP PROGRESS BAR === */
+  .loadWrap{position:fixed;top:0;left:0;right:0;height:6px;background:var(--barBg);z-index:9999;display:none}
   .bar{position:absolute;left:0;top:0;height:100%;width:0;background:var(--bar);transition:width .25s ease}
-  .indeterminate{background:
-    linear-gradient(90deg,transparent,rgba(59,130,246,.9),transparent);
-    background-size:200% 100%;animation:indet 1s linear infinite}
+  .indeterminate{background:linear-gradient(90deg,transparent,rgba(59,130,246,.9),transparent);
+                 background-size:200% 100%;animation:indet 1s linear infinite}
   @keyframes indet{0%{background-position:200% 0}100%{background-position:-200% 0}}
 </style>
 </head>
@@ -100,8 +98,8 @@
   </div>
 </div>
 
-<!-- Top progress bar (hidden after scan) -->
-<div class="loadWrap" id="loadWrap" style="display:none"><div id="loadBar" class="bar indeterminate"></div></div>
+<!-- Top progress bar -->
+<div class="loadWrap" id="loadWrap"><div id="loadBar" class="bar indeterminate"></div></div>
 
 <div id="stack" class="stack" aria-live="polite"></div>
 
@@ -131,7 +129,7 @@ const qs=new URLSearchParams(location.search);
 const startIndex = Math.max(1, parseInt(qs.get("start")||"1",10));
 const maxIndex   = Math.min(parseInt(qs.get("max")||"999",10) || 999, 5000);
 const stopAtFirstMiss = (qs.get("gap")||"").toLowerCase()!=="allow"; // contiguous
-const scanConcurrency = 6;
+const scanConcurrency = 6; // declared ONCE
 
 /* ===== Elements & state ===== */
 const $stack = document.getElementById("stack");
@@ -144,9 +142,9 @@ const $bar = document.getElementById("loadBar");
 
 const observed = new WeakSet();
 let slidesRef = [];
-let firstVisibleSet = false;
+let firstSlideMade = false;
 
-/* ===== Networking helpers ===== */
+/* ===== Helpers ===== */
 async function headOrTinyGet(url){
   try{ const r = await fetch(url,{method:"HEAD",cache:"no-store"}); if (r.ok) return r; }catch{}
   try{ const r2= await fetch(url,{headers:{"Range":"bytes=0-0"},cache:"no-store"}); return r2; }catch{ return {ok:false}; }
@@ -167,18 +165,15 @@ async function findMediaFor(i){
   return null;
 }
 
-/* ===== UI builders ===== */
 function makeSlide(meta){
   const slide = document.createElement("section");
   slide.className = "slide";
   slide.dataset.url = meta.url;
   slide.dataset.type = meta.type;
-
   const ph = document.createElement("div");
   ph.className = "ph";
   ph.textContent = `Loading ${meta.url}…`;
   slide.appendChild(ph);
-
   return slide;
 }
 function mountMedia(slide){
@@ -187,30 +182,20 @@ function mountMedia(slide){
   const url = slide.dataset.url;
   const t   = slide.dataset.type;
 
-  function firstVisual(){
-    if (!firstVisibleSet){
-      firstVisibleSet = true;
-      // Hide big overlay, show top bar while scanning continues
-      $loader.classList.add("off");
-      $barWrap.style.display = "block";
-      updateDownloadFor(slide);
-    }
-  }
-
   if (t === "image"){
     const img = document.createElement("img");
     img.className = "media hidden"; img.alt = url; img.decoding="async";
-    img.addEventListener("load", ()=>{ img.classList.remove("hidden"); slide.querySelector(".ph")?.remove(); firstVisual(); }, {once:true});
+    img.addEventListener("load", ()=>{ img.classList.remove("hidden"); slide.querySelector(".ph")?.remove(); }, {once:true});
     img.src = url; slide.appendChild(img);
   }else if (t === "video"){
     const vid = document.createElement("video");
     vid.className="media hidden"; vid.playsInline=true; vid.controls=true; vid.preload="metadata";
-    vid.addEventListener("loadeddata", ()=>{ vid.classList.remove("hidden"); slide.querySelector(".ph")?.remove(); firstVisual(); }, {once:true});
+    vid.addEventListener("loadeddata", ()=>{ vid.classList.remove("hidden"); slide.querySelector(".ph")?.remove(); }, {once:true});
     vid.src = url; slide.appendChild(vid);
   }else{
     const wrap = document.createElement("div"); wrap.className="audioWrap";
     const aud = document.createElement("audio"); aud.className="audioPlayer"; aud.controls=true; aud.preload="metadata"; aud.src=url;
-    aud.addEventListener("loadeddata", ()=>{ slide.querySelector(".ph")?.remove(); firstVisual(); }, {once:true});
+    aud.addEventListener("loadeddata", ()=>{ slide.querySelector(".ph")?.remove(); }, {once:true});
     wrap.appendChild(aud); slide.appendChild(wrap);
   }
 }
@@ -220,18 +205,18 @@ const io = new IntersectionObserver((entries)=>{
   entries.forEach(e=>{ if(e.isIntersecting) { mountMedia(e.target); updateDownloadFor(e.target); } });
 },{root:$stack, rootMargin:"200px 0px", threshold:0.01});
 
-/* ===== Loading bar control ===== */
+/* Progress bar */
 function setIndeterminate(on){
-  if (on){ $bar.classList.add("indeterminate"); $bar.style.width="100%"; }
+  if (on){ $bar.classList.add("indeterminate"); $bar.style.width="100%"; $barWrap.style.display="block"; }
   else { $bar.classList.remove("indeterminate"); $bar.style.width="0%"; }
 }
-function setProgress(f){ // f in [0,1]
+function setProgress(f){
   $bar.classList.remove("indeterminate");
   $bar.style.width = (Math.max(0, Math.min(1, f))*100).toFixed(1)+"%";
 }
 function hideBar(){ $bar.style.width="0%"; $bar.classList.remove("indeterminate"); $barWrap.style.display="none"; }
 
-/* ===== Download button control (global) ===== */
+/* Download button */
 function currentSlideIndex(){
   let bestIdx = 0, bestDist = Infinity;
   slidesRef.forEach((el, i)=>{
@@ -250,8 +235,7 @@ function updateDownloadFor(slideEl){
   $dlGlobal.setAttribute("download", url.split("/").pop());
 }
 
-/* ===== Scan strategy ===== */
-const scanConcurrency = 6; // (redeclared intentionally – keep here for clarity)
+/* ===== Boot: show first image immediately, then scan ===== */
 (async function boot(){
   setIndeterminate(true);
 
@@ -264,18 +248,20 @@ const scanConcurrency = 6; // (redeclared intentionally – keep here for clarit
   if (!firstMeta){
     $loader.querySelector(".loadText").textContent = "No media found";
     $loader.querySelector(".subText").textContent = "Place img-1, img-2, … next to this page.";
-    setIndeterminate(false);
     return;
   }
 
-  // Render first slide immediately
+  // Create and show first slide IMMEDIATELY (and start top bar; hide overlay)
   const firstSlide = makeSlide(firstMeta);
   $stack.appendChild(firstSlide);
   slidesRef.push(firstSlide);
   io.observe(firstSlide);
-  mountMedia(firstSlide); // triggers overlay hide when loaded
+  mountMedia(firstSlide);
+  updateDownloadFor(firstSlide);
+  $loader.classList.add("off");   // show the first image while scanning
+  $barWrap.style.display = "block";
 
-  // Continue scanning forward with small concurrency
+  // Continue scanning forward with concurrency
   let stop = false;
   let lastGood = firstMeta.index;
   let knownTotal = null;
@@ -291,7 +277,6 @@ const scanConcurrency = 6; // (redeclared intentionally – keep here for clarit
       $stack.appendChild(s);
       slidesRef.push(s);
       io.observe(s);
-      // Prefetch hint for the next one
       const l = document.createElement("link"); l.rel="prefetch"; l.href=m.url; document.head.appendChild(l);
     }else if (stopAtFirstMiss){
       stop = true;
@@ -306,9 +291,6 @@ const scanConcurrency = 6; // (redeclared intentionally – keep here for clarit
     }
   }
 
-  // Switch from full overlay to bar as soon as first media is up; already handled in mountMedia()
-
-  // Start workers
   let cursor = firstMeta.index + 1;
   const workers = Array.from({length: scanConcurrency}, async ()=>{
     while(!stop && cursor <= maxIndex){
@@ -319,7 +301,6 @@ const scanConcurrency = 6; // (redeclared intentionally – keep here for clarit
   await Promise.all(workers);
 
   if (!knownTotal){ // reached max without a miss
-    setIndeterminate(false);
     hideBar();
   }
 
@@ -328,7 +309,7 @@ const scanConcurrency = 6; // (redeclared intentionally – keep here for clarit
   if (!isNaN(h) && h>=1 && h<=slidesRef.length){ slidesRef[h-1].scrollIntoView({block:"start"}); }
 })();
 
-/* ===== Nav buttons ===== */
+/* Nav buttons */
 function goto(idx){
   if (!slidesRef.length) return;
   const clamped = Math.max(0, Math.min(idx, slidesRef.length-1));
